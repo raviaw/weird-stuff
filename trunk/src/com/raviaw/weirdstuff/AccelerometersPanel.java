@@ -20,6 +20,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 
+import android.os.SystemClock;
+
 import android.util.AttributeSet;
 import android.util.Log;
 
@@ -30,34 +32,39 @@ import android.view.SurfaceView;
 import com.google.common.collect.EvictingQueue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author <a href="mailto:raviw@emerald-associates.com">Ravi Wallau</a>
  */
 public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Callback, SensorEventListener
 {
-    public static final int TRAIL = 30;
+    public static final int TRAIL_SIZE = 30;
     private String tag = getClass().getSimpleName();
 
     private DrawThread drawThread = null;
     private SurfaceHolder sf;
     private Sensor accelerometer;
     private final AtomicBoolean running = new AtomicBoolean( false );
-    private final AtomicInteger circle = new AtomicInteger( 0 );
-    private List<Dot> dots = new ArrayList<Dot>();
-    int counter = 0;
+    private final List<MovingDot> dots = new ArrayList<MovingDot>();
 
-    final Paint thinGreen = buildPaint( Color.rgb( 0, 127, 0 ), 2.0F );
-    final Paint thinBlack = buildPaint( Color.BLACK, 0.0F );
-    final Paint thinWhite = buildPaint( Color.WHITE, 1.0F );
-    final Paint thinYellow = buildPaint( Color.YELLOW, 1.0F );
-    final Paint thinRed = buildPaint( Color.rgb( 127, 0, 0 ), 1.0F );
+    private final AtomicInteger touchingFingers = new AtomicInteger();
+    private final EvictingQueue<TouchingInformation> userTouchingTrail = EvictingQueue.create( 200 );
+    private final Paint p = buildPaint( Color.RED, 2.0F );
+    private final Paint textPaint = buildTextPaint( Color.WHITE, 2.0F );
+
+
+    private final long TOUCH_SAMPLE_RATE_MS = 20;
+
+    private final AtomicLong lastFrameRendered = new AtomicLong( SystemClock.elapsedRealtime() );
+    private final AtomicLong lastSample = new AtomicLong( 0 );
 
     float x = 0F;
     float y = 0F;
@@ -102,7 +109,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             for( float f2 = 0.10F; f2 < 1.0F; f2 += interval ) {
                 final float fl1 = 0.04F - 0.08F * ( 1000F / r.nextInt( 1000 ) );
                 final float fl2 = 0.04F - 0.08F * ( 1000F / r.nextInt( 1000 ) );
-                dots.add( new Dot( f1, f2, fl1, fl2, 0.0F, 0.0F ) );
+                dots.add( new MovingDot( f1, f2, fl1, fl2, 0.0F, 0.0F ) );
             }
         }
 
@@ -115,7 +122,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         super.onMeasure( widthMeasureSpec, heightMeasureSpec );
     }
 
-    private void drawIt( final Canvas canvas )
+    private void progressLines( final Canvas canvas )
     {
         if( canvas == null ) {
             return; // Nothing to do!
@@ -126,22 +133,61 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         canvas.drawColor( 0, PorterDuff.Mode.CLEAR );
 
         //drawLocationCue( canvas );
-        drawTheDamnLines( canvas );
+        //drawRenderPoints( canvas );
+        nextRenderPoint();
+        renderLines( canvas );
+        recordPerformanceInformation( canvas );
     }
 
-    private void drawTheDamnLines( final Canvas canvas )
+    private void recordPerformanceInformation( final Canvas canvas )
     {
-        final EvictingQueue<Float> xBezier = EvictingQueue.create( 3 );
-        final EvictingQueue<Float> yBezier = EvictingQueue.create( 3 );
+        final long now = SystemClock.elapsedRealtime();
+        final long before = lastFrameRendered.getAndSet( now );
+        final long time = now - before;
+        //Log.v( tag, "Last frame rendered in: " + time );
 
-        //final Dot firstDot = dots.get( 0 );
-        //path.moveTo( x( firstDot.x ), y( firstDot.y ) );
-        for( final Dot dot : dots ) {
+        canvas.drawText( "FPS: " + ( 1000 / time ), x( 0 ), y( 1 ) - 15F, textPaint );
+    }
+
+    /*private void drawRenderPoints( final Canvas canvas )
+    {
+        synchronized( userTouchingTrail ) {
+            final Iterator<TouchingInformation> iter = userTouchingTrail.iterator();
+            while( iter.hasNext() ) {
+                TouchingInformation next = iter.next();
+                if( next.dots.size() > 0 ) {
+                    final Dot firstDot = next.dots.get( 0 );
+                    canvas.drawCircle( x( firstDot.x ), y( firstDot.y ), 5.0F, p );
+                }
+            }
+        }
+    }*/
+
+    private void nextRenderPoint()
+    {
+        if( userTouchingTrail.size() > 0 ) {
+            final TouchingInformation touch = userTouchingTrail.poll();
+            if( touch.dots.size() > 0 ) {
+                final Dot firstDot = touch.dots.get( 0 );
+                x = firstDot.x;
+                y = firstDot.y;
+            }
+        }
+    }
+
+    private void renderLines( final Canvas canvas )
+    {
+        // final TouchingInformation touch = userTouchingTrail.poll();
+        canvas.drawCircle( x( x ), y( y ), 10.0F, p );
+
+        for( final MovingDot dot : dots ) {
+            final EvictingQueue<Float> xBezier = EvictingQueue.create( 3 );
+            final EvictingQueue<Float> yBezier = EvictingQueue.create( 3 );
+
             final Path path = new Path();
             final int size = Math.min( dot.xQueue.size(), dot.yQueue.size() );
             final Iterator<Float> xIter = dot.xQueue.iterator();
             final Iterator<Float> yIter = dot.yQueue.iterator();
-
             float currentX = 0.0F;
             float currentY = 0.0F;
 
@@ -167,7 +213,6 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             if( !path.isEmpty() ) {
                 canvas.drawPath( path, dot.p );
             }
-
             if( size > 0 ) {
                 canvas.drawCircle( x( currentX ), y( currentY ), 4.0F, dot.p );
             }
@@ -175,20 +220,6 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         }
     }
 
-/*    private void drawLocationCue( final Canvas canvas )
-    {
-        canvas.drawLine( x( 0.0F ), y( y ), x( 1.0F ), y( y ), thinGreen );
-        canvas.drawLine( x( x ), y( 0.0F ), x( x ), y( 1.0F ), thinGreen );
-
-        float width = circle.getAndAdd( -10 );
-        if( width < 0 ) {
-            circle.set( 100 );
-            width = 0;
-        }
-
-        canvas.drawCircle( x( x ), y( y ), width, thinRed );
-    }
-*/
     private float absoluteMin( final float value, final float absoluteMinSpeed )
     {
         if( Math.abs( value ) < absoluteMinSpeed ) {
@@ -215,31 +246,20 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         }
     }
 
-/*    private float absoluteRange( final float value, final float absoluteMinSpeed, final float absoluteMaxSpeed )
-    {
-        if( Math.abs( value ) < absoluteMinSpeed ) {
-            if( value < 0 ) {
-                return absoluteMinSpeed * -1F;
-            } else {
-                return absoluteMinSpeed;
-            }
-        } else if( Math.abs( value ) > absoluteMaxSpeed ) {
-            if( value < 0 ) {
-                return absoluteMaxSpeed * -1F;
-            } else {
-                return absoluteMaxSpeed;
-            }
-        } else {
-            return value;
-        }
-    }
-*/
     private static Paint buildPaint( final int color, final float width )
     {
         final Paint paint = new Paint();
         paint.setColor( color );
         paint.setStyle( Paint.Style.STROKE );
         paint.setStrokeWidth( width );
+        return paint;
+    }
+
+    private Paint buildTextPaint( final int color, final float width )
+    {
+        final Paint paint = buildPaint( color, width );
+        paint.setTextSize( 15F );
+        paint.setTextAlign( Paint.Align.RIGHT );
         return paint;
     }
 
@@ -350,31 +370,49 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
 
     public boolean touchEvent( final MotionEvent event )
     {
+        touchingFingers.set( event.getPointerCount() );
+
         switch( event.getAction() & MotionEvent.ACTION_MASK ) {
             case MotionEvent.ACTION_UP:
-                useEventSource = UseEventSource.ACCELEROMETER;
-                backToOrigin = false;
+                //useEventSource = UseEventSource.ACCELEROMETER;
+                //backToOrigin = false;
                 return true;
             case MotionEvent.ACTION_DOWN:
                 backToOrigin = false;
                 useEventSource = UseEventSource.TOUCH;
+/*
                 x = 1.0F - unscaleWidth( event.getX() );
                 y = unscaleHeight( event.getY() );
+*/
+                queueEventInfo( event );
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:
-                backToOrigin = true;
+                //backToOrigin = true;
                 return true;
             case MotionEvent.ACTION_POINTER_UP: // WRONG but it is okay
-                backToOrigin = false;
+                //backToOrigin = false;
                 return true;
-            case MotionEvent.ACTION_MOVE:
+            case MotionEvent.ACTION_MOVE: // How many times a second is this recorded?
                 useEventSource = UseEventSource.TOUCH;
-                x = 1.0F - unscaleWidth( event.getX() );
-                y = unscaleHeight( event.getY() );
+                queueEventInfo( event );
                 return true;
         }
 
         return false;
+    }
+
+    private void queueEventInfo( final MotionEvent event )
+    {
+        final long currentTime = System.currentTimeMillis();
+        if( currentTime - lastSample.get() > TOUCH_SAMPLE_RATE_MS ) {
+            userTouchingTrail.add(
+                new TouchingInformation(
+                    0,
+                    Collections.singletonList( new Dot( 1.0F - unscaleWidth( event.getX() ), unscaleHeight( event.getY() ) ) )
+                )
+            );
+            lastSample.set( currentTime );
+        }
     }
 
     @Override
@@ -395,7 +433,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
                 try {
                     c = sf.lockCanvas();
                     synchronized( sf ) {
-                        drawIt( c );
+                        progressLines( c );
                         Thread.sleep( 25 );
                     }
                 } catch( final InterruptedException e ) {
@@ -410,25 +448,25 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         }
     }
 
-    private class Dot
+    private class MovingDot
     {
-        private final float ox;
-        private final float oy;
+        private final float originalX;
+        private final float originalY;
         private float x;
         private float y;
         private float xSpeed;
         private float ySpeed;
         private float xAcceleration;
         private float yAcceleration;
-        private Queue<Float> xQueue = EvictingQueue.create( TRAIL );
-        private Queue<Float> yQueue = EvictingQueue.create( TRAIL );
+        private Queue<Float> xQueue = EvictingQueue.create( TRAIL_SIZE );
+        private Queue<Float> yQueue = EvictingQueue.create( TRAIL_SIZE );
         private final Paint p =
             buildPaint(
                 Color.rgb( 100 + RANDOM.nextInt( 155 ), 100 + RANDOM.nextInt( 155 ), 100 + RANDOM.nextInt( 155 ) ),
                 1.0F
             );
 
-        private Dot(
+        private MovingDot(
             final float x,
             final float y,
             final float xSpeed,
@@ -437,8 +475,8 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             final float yAcceleration
         )
         {
-            this.ox = x;
-            this.oy = y;
+            this.originalX = x;
+            this.originalY = y;
             setX( x );
             setY( y );
             this.xSpeed = xSpeed;
@@ -452,8 +490,8 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             final float toX;
             final float toY;
             if( backToOrigin ) {
-                toX = ox;
-                toY = oy;
+                toX = originalX;
+                toY = originalY;
             } else {
                 toX = AccelerometersPanel.this.x;
                 toY = AccelerometersPanel.this.y;
@@ -494,6 +532,39 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
                 ", xAcceleration=" + xAcceleration +
                 ", yAcceleration=" + yAcceleration +
                 '}';
+        }
+    }
+
+    private class Dot
+    {
+        private final float x;
+        private final float y;
+
+        private Dot( final float x, final float y )
+        {
+            this.x = x;
+            this.y = y;
+        }
+
+        @Override
+        public String toString()
+        {
+            return "Dot{" +
+                "x=" + x +
+                ", y=" + y +
+                '}';
+        }
+    }
+
+    private class TouchingInformation
+    {
+        private final int touchingFingerCount;
+        private final List<Dot> dots;
+
+        private TouchingInformation( final int touchingFingerCount, final List<Dot> dots )
+        {
+            this.touchingFingerCount = touchingFingerCount;
+            this.dots = dots;
         }
     }
 
