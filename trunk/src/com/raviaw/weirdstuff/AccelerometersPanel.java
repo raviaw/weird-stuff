@@ -30,6 +30,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
 import com.google.common.collect.EvictingQueue;
+import com.google.common.collect.Lists;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -56,19 +57,21 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
     private final List<MovingDot> dots = new ArrayList<MovingDot>();
 
     private final AtomicInteger touchingFingers = new AtomicInteger();
-    private final EvictingQueue<TouchingInformation> userTouchingTrail = EvictingQueue.create( 200 );
-    private final Paint p = buildPaint( Color.RED, 2.0F );
+    private final MultiIndexRotatingArray<TouchingInformation> userTouchingTrail =
+        new MultiIndexRotatingArray<TouchingInformation>( 200, null );
+    private final Paint thinWhite = buildPaint( Color.WHITE, 2.0F );
     private final Paint textPaint = buildTextPaint( Color.WHITE, 2.0F );
-
 
     private final long TOUCH_SAMPLE_RATE_MS = 20;
 
     private final AtomicLong lastFrameRendered = new AtomicLong( SystemClock.elapsedRealtime() );
     private final AtomicLong lastSample = new AtomicLong( 0 );
 
+/*
     float x = 0F;
     float y = 0F;
     float z = 0F;
+*/
 
     int changeCounter = 0;
 
@@ -114,6 +117,22 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         }
 
         Log.d( tag, "Dots: " + dots.size() );
+
+        fillCoordinatesWithCircle( userTouchingTrail.capacity() );
+    }
+
+    private void fillCoordinatesWithCircle( final int count )
+    {
+        for( float angle = 0; angle <= Math.PI * 2.0; angle += ( ( Math.PI * 2.0 ) / ( ( double )count / 2.0 ) ) ) {
+            final float x = proportion( ( float )Math.sin( angle ), -1.0F, 1F, 0F, 1F );
+            final float y = proportion( ( float )Math.cos( angle ), -1.0F, 1F, 0F, 1F );
+            userTouchingTrail.add( new TouchingInformation( 1, Collections.singletonList( new Dot( x, y ) ) ) );
+        }
+        for( float angle = 0; angle <= Math.PI * 2.0; angle += ( ( Math.PI * 2.0 ) / ( ( double )count / 2.0 ) ) ) {
+            final float x = proportion( ( float )Math.sin( angle ), -1.0F, 1F, 0.25F, 0.75F );
+            final float y = proportion( ( float )Math.cos( angle ), -1.0F, 1F, 0.25F, 0.75F );
+            userTouchingTrail.add( new TouchingInformation( 1, Collections.singletonList( new Dot( x, y ) ) ) );
+        }
     }
 
     @Override
@@ -133,8 +152,9 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         canvas.drawColor( 0, PorterDuff.Mode.CLEAR );
 
         //drawLocationCue( canvas );
-        //drawRenderPoints( canvas );
-        nextRenderPoint();
+        //drawUserPositionTrail( canvas );
+        drawUserPositionTrail( canvas );
+        //nextRenderPoint();
         renderLines( canvas );
         recordPerformanceInformation( canvas );
     }
@@ -149,54 +169,51 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         canvas.drawText( "FPS: " + ( 1000 / time ), x( 0 ), y( 1 ) - 15F, textPaint );
     }
 
-    /*private void drawRenderPoints( final Canvas canvas )
+    private void drawUserPositionTrail( final Canvas canvas )
     {
-        synchronized( userTouchingTrail ) {
-            final Iterator<TouchingInformation> iter = userTouchingTrail.iterator();
-            while( iter.hasNext() ) {
-                TouchingInformation next = iter.next();
-                if( next.dots.size() > 0 ) {
-                    final Dot firstDot = next.dots.get( 0 );
-                    canvas.drawCircle( x( firstDot.x ), y( firstDot.y ), 5.0F, p );
-                }
-            }
-        }
-    }*/
-
-    private void nextRenderPoint()
-    {
-        if( userTouchingTrail.size() > 0 ) {
-            final TouchingInformation touch = userTouchingTrail.poll();
-            if( touch.dots.size() > 0 ) {
-                final Dot firstDot = touch.dots.get( 0 );
-                x = firstDot.x;
-                y = firstDot.y;
+        userTouchingTrail.resetPointer();
+        TouchingInformation ti;
+        while( ( ti = userTouchingTrail.nextResettablePointer() ) != null ) {
+            for( final Dot dot : ti.getDots() ) {
+                final float centerX = x( dot.x );
+                final float centerY = y( dot.y );
+                canvas.drawLine( centerX, centerY, centerX + 1, centerY + 1, thinWhite );
             }
         }
     }
 
+
     private void renderLines( final Canvas canvas )
     {
         // final TouchingInformation touch = userTouchingTrail.poll();
-        canvas.drawCircle( x( x ), y( y ), 10.0F, p );
+        final TouchingInformation ti = userTouchingTrail.nextList1();
+        if( ti == null ) {
+            return;
+        }
+        for( int i = 0; i < dots.size(); i++ ) {
+            final MovingDot movingDot = dots.get( i );
+            if( ti.getTouchingFingerCount() == 0 ) {
+                continue;
+            }
+            final Dot dotToUse = ti.getDots().get( i % ti.getTouchingFingerCount() );
+            movingDot.progressDot( dotToUse );
 
-        for( final MovingDot dot : dots ) {
             final EvictingQueue<Float> xBezier = EvictingQueue.create( 3 );
             final EvictingQueue<Float> yBezier = EvictingQueue.create( 3 );
 
             final Path path = new Path();
-            final int size = Math.min( dot.xQueue.size(), dot.yQueue.size() );
-            final Iterator<Float> xIter = dot.xQueue.iterator();
-            final Iterator<Float> yIter = dot.yQueue.iterator();
+            final int size = Math.min( movingDot.xQueue.size(), movingDot.yQueue.size() );
+            final Iterator<Float> xIter = movingDot.xQueue.iterator();
+            final Iterator<Float> yIter = movingDot.yQueue.iterator();
             float currentX = 0.0F;
             float currentY = 0.0F;
 
-            for( int i = 0; i < size; i++ ) {
+            for( int j = 0; j < size; j++ ) {
                 currentX = xIter.next();
                 currentY = yIter.next();
                 xBezier.add( currentX );
                 yBezier.add( currentY );
-                if( i >= 3 ) {
+                if( j >= 3 ) {
                     final Iterator<Float> xBezierIter = xBezier.iterator();
                     final Float x1 = xBezierIter.next();
                     final Float x2 = xBezierIter.next();
@@ -211,12 +228,11 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
                 }
             }
             if( !path.isEmpty() ) {
-                canvas.drawPath( path, dot.p );
+                canvas.drawPath( path, movingDot.p );
             }
             if( size > 0 ) {
-                canvas.drawCircle( x( currentX ), y( currentY ), 4.0F, dot.p );
+                canvas.drawCircle( x( currentX ), y( currentY ), 4.0F, movingDot.p );
             }
-            dot.progressDot();
         }
     }
 
@@ -255,7 +271,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
         return paint;
     }
 
-    private Paint buildTextPaint( final int color, final float width )
+    private static Paint buildTextPaint( final int color, final float width )
     {
         final Paint paint = buildPaint( color, width );
         paint.setTextSize( 15F );
@@ -271,11 +287,6 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
     private float y( final float value )
     {
         return proportion( value, 0, 1, 0, getHeight() - ( getPaddingTop() + getPaddingBottom() ) );
-    }
-
-    private float unscaleGravity( final float sensorValue )
-    {
-        return proportion( sensorValue, -10F, 10F, 0.0F, 1.0F );
     }
 
     private float unscaleWidth( final float value )
@@ -354,6 +365,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
     @Override
     public void onSensorChanged( final SensorEvent event )
     {
+/*
         if( useEventSource == UseEventSource.ACCELEROMETER ) {
             if( !backToOrigin ) {
                 x = unscaleGravity( event.values[ 0 ] );
@@ -366,6 +378,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             }
         }
         z = unscaleGravity( event.values[ 2 ] );
+*/
     }
 
     public boolean touchEvent( final MotionEvent event )
@@ -405,12 +418,25 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
     {
         final long currentTime = System.currentTimeMillis();
         if( currentTime - lastSample.get() > TOUCH_SAMPLE_RATE_MS ) {
-            userTouchingTrail.add(
-                new TouchingInformation(
-                    0,
-                    Collections.singletonList( new Dot( 1.0F - unscaleWidth( event.getX() ), unscaleHeight( event.getY() ) ) )
-                )
-            );
+            final int pointerCount = event.getPointerCount();
+            if( pointerCount > 1 ) {
+                final List<Dot> dots = Lists.newArrayList();
+                for( int i = 0; i < pointerCount; i++ ) {
+                    final MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
+                    event.getPointerCoords( i, coords );
+                    dots.add( new Dot( 1.0F - unscaleWidth( coords.x ), unscaleHeight( coords.y ) ) );
+                }
+                userTouchingTrail.add( new TouchingInformation( pointerCount, dots ) );
+            } else {
+                userTouchingTrail.add(
+                    new TouchingInformation(
+                        1,
+                        Collections.singletonList(
+                            new Dot( 1.0F - unscaleWidth( event.getX() ), unscaleHeight( event.getY() ) )
+                        )
+                    )
+                );
+            }
             lastSample.set( currentTime );
         }
     }
@@ -485,7 +511,7 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
             this.yAcceleration = yAcceleration;
         }
 
-        private void progressDot()
+        private void progressDot( final Dot towards )
         {
             final float toX;
             final float toY;
@@ -493,8 +519,8 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
                 toX = originalX;
                 toY = originalY;
             } else {
-                toX = AccelerometersPanel.this.x;
-                toY = AccelerometersPanel.this.y;
+                toX = towards.x;
+                toY = towards.y;
             }
             final float xd = toX - this.x;
             final float yd = toY - this.y;
@@ -532,39 +558,6 @@ public class AccelerometersPanel extends SurfaceView implements SurfaceHolder.Ca
                 ", xAcceleration=" + xAcceleration +
                 ", yAcceleration=" + yAcceleration +
                 '}';
-        }
-    }
-
-    private class Dot
-    {
-        private final float x;
-        private final float y;
-
-        private Dot( final float x, final float y )
-        {
-            this.x = x;
-            this.y = y;
-        }
-
-        @Override
-        public String toString()
-        {
-            return "Dot{" +
-                "x=" + x +
-                ", y=" + y +
-                '}';
-        }
-    }
-
-    private class TouchingInformation
-    {
-        private final int touchingFingerCount;
-        private final List<Dot> dots;
-
-        private TouchingInformation( final int touchingFingerCount, final List<Dot> dots )
-        {
-            this.touchingFingerCount = touchingFingerCount;
-            this.dots = dots;
         }
     }
 
