@@ -8,6 +8,8 @@
 //
 package com.raviaw.weirdstuff;
 
+import android.util.Log;
+
 import com.google.common.collect.Lists;
 
 import java.util.Collections;
@@ -19,44 +21,58 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class MultiIndexRotatingArray<T>
 {
+    private final String tag = getClass().getSimpleName();
+
     private final int capacity;
     private final AtomicInteger writePointer = new AtomicInteger();
     private final AtomicInteger rotatablePointer1 = new AtomicInteger( 0 );
     private final AtomicInteger rotatablePointer2 = new AtomicInteger( 0 );
     private final AtomicInteger resettablePointer = new AtomicInteger( 0 );
+    private final AtomicInteger maxIndex = new AtomicInteger();
 
     private final List<T> list;
+    private final T firstFill;
 
     public MultiIndexRotatingArray( final int capacity, final T fillWith )
     {
         this.capacity = capacity;
-        list = Lists.newArrayList( Collections.<T>nCopies( capacity, fillWith ) );
+        this.firstFill = fillWith;
+        this.list = Lists.newArrayList( Collections.<T>nCopies( capacity, fillWith ) );
     }
 
     public void add( final T element )
     {
-        list.set( nextFromCounter( writePointer ), element );
+        list.set( nextFromWriteCounter( writePointer ), element );
     }
 
-    private int nextFromCounter( final AtomicInteger counter )
+    public void resetEverything()
     {
-        final int position = counter.getAndIncrement();
-        if( position < capacity ) {
-            return position;
-        } else {
-            counter.set( 0 );
-            return 0;
+        rotatablePointer1.set( 0 );
+        rotatablePointer2.set( 0 );
+        resettablePointer.set( 0 );
+        maxIndex.set( 0 );
+        writePointer.set( 0 );
+
+/*
+        for( int i = 0; i < list.size(); i++ ) {
+            list.set( i, firstFill );
         }
+*/
+    }
+
+    public T sameList1()
+    {
+        return list.get( rotatablePointer1.get() );
     }
 
     public T nextList1()
     {
-        return list.get( nextFromCounter( rotatablePointer1 ) );
+        return list.get( nextFromReadCounter( rotatablePointer1 ) );
     }
 
     public T nextList2()
     {
-        return list.get( nextFromCounter( rotatablePointer2 ) );
+        return list.get( nextFromReadCounter( rotatablePointer2 ) );
     }
 
     public void resetPointer()
@@ -64,18 +80,49 @@ public class MultiIndexRotatingArray<T>
         resettablePointer.set( 0 );
     }
 
+    public int capacity()
+    {
+        return capacity;
+    }
+
     public T nextResettablePointer()
     {
         final int next = resettablePointer.getAndIncrement();
-        if( next < capacity ) {
+        if( next < maxIndex.get() ) {
             return list.get( next );
         } else {
             return null;
         }
     }
 
-    public int capacity()
+    private int nextFromReadCounter( final AtomicInteger counter )
     {
-        return capacity;
+        final int position = counter.getAndIncrement();
+        if( position < maxIndex.get() ) {
+            Log.v( tag, "Returning position " + position );
+            return position;
+        } else {
+            counter.set( 0 );
+            return 0;
+        }
+    }
+
+    private int nextFromWriteCounter( final AtomicInteger counter )
+    {
+        final int position = counter.getAndIncrement();
+        if( position < capacity ) {
+            if( maxIndex.get() < position ) {
+                maxIndex.set( position );
+            }
+            return position;
+        } else {
+            counter.set( 0 );
+            return 0;
+        }
+    }
+
+    public int list1Position()
+    {
+        return rotatablePointer1.get();
     }
 }
