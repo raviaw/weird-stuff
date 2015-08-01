@@ -1,0 +1,1 @@
+This is the source code for the application https://play.google.com/store/apps/details?id=com.raviaw.weirdstuff on Google Play.
